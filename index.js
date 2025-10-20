@@ -1,70 +1,65 @@
-import express from "express";
-import admin from "firebase-admin";
-
+const express = require("express");
+const admin = require("firebase-admin");
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// ✅ Firebase Setup
-const firebaseKey = JSON.parse(process.env.FIREBASE_KEY);
+// 🪙 1 USD = 5000 coins
+const COINS_PER_DOLLAR = 5000;
+
+// 🔐 Firebase initialization
+// Agar aap Vercel env variable use karna chahte ho:
+const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT_KEY);
+
+// Agar aap direct file use karna chahte ho:
+// const serviceAccount = require("./serviceAccountKey.json");
 
 admin.initializeApp({
-  credential: admin.credential.cert(firebaseKey),
-  databaseURL: "https://YOUR_PROJECT_ID.firebaseio.com"
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: "https://<earn-captcha-bot-latest>.firebaseio.com"  // 👉 apna Firebase project ID daalna
 });
 
 const db = admin.firestore();
 
-// ✅ Secure token (so only MyLead can trigger)
-const MYLEAD_SECRET = process.env.MYLEAD_SECRET || "MySecretKey123";
-
-// ✅ $1 = 5000 coins
-const COIN_RATE = 5000;
-
-// ----------------------
-// 🔥 POSTBACK HANDLER
-// ----------------------
-app.get("/", async (req, res) => {
-  const { subid, payout, secret } = req.query;
-
-  // Validation
-  if (!subid || !payout) {
-    return res.status(400).send("❌ Missing parameters");
-  }
-
-  // Security check
-  if (secret !== MYLEAD_SECRET) {
-    return res.status(403).send("🚫 Unauthorized");
-  }
-
-  const coins = Math.round(Number(payout) * COIN_RATE);
-
+app.get("/postback", async (req, res) => {
   try {
+    const { subid, payout, transaction_id } = req.query;
+
+    if (!subid || !payout || !transaction_id) {
+      return res.status(400).send("❌ Missing parameters");
+    }
+
+    const payoutAmount = parseFloat(payout);
+    const coins = Math.round(payoutAmount * COINS_PER_DOLLAR);
+
+    console.log(`✅ Conversion Received:
+    SubID: ${subid}
+    Payout: $${payoutAmount}
+    Coins to Add: ${coins}
+    Transaction: ${transaction_id}`);
+
+    // 🔥 Firestore me user ka wallet update
     const userRef = db.collection("users").doc(subid);
     const userDoc = await userRef.get();
 
     if (!userDoc.exists) {
-      return res.send(`⚠️ User not found: ${subid}`);
+      return res.status(404).send("❌ User not found");
     }
 
-    // Update user coins
+    const currentCoins = userDoc.data().walletCoins || 0;
+    const newBalance = currentCoins + coins;
+
     await userRef.update({
-      coins: admin.firestore.FieldValue.increment(coins),
-      lastEarned: new Date().toISOString()
+      walletCoins: newBalance,
+      lastTransactionId: transaction_id,
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    console.log(`✅ ${subid} credited with ${coins} coins ($${payout})`);
-    res.send(`OK - ${subid} credited with ${coins} coins`);
+    console.log(`🪙 ${coins} coins added to UID: ${subid}`);
+
+    res.status(200).send("OK");
   } catch (error) {
-    console.error("❌ Firebase update failed:", error);
-    res.status(500).send("Internal Server Error");
+    console.error("❌ Error in postback:", error);
+    res.status(500).send("Server error");
   }
 });
 
-// ----------------------
-// 🔥 HEALTH CHECK
-// ----------------------
-app.get("/ping", (req, res) => {
-  res.send("✅ MyLead Postback API working fine!");
-});
-
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(3000, () => console.log("🚀 Postback server running"));
